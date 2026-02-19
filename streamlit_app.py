@@ -5,129 +5,192 @@ import plotly.graph_objects as go
 from datetime import datetime, date
 import uuid
 
-# --- 大师级核心引擎：业财一体化数据中台 ---
-class ERPDataCenter:
+# ==========================================
+# 1. 后端：四层树状组织架构数据库引擎
+# ==========================================
+class EnterpriseERPEngine:
     def __init__(self):
-        self.conn = sqlite3.connect('cqc_online_erp.db', check_same_thread=False)
-        self.cursor = self.conn.cursor()
-        self._init_core_tables()
+        self.db_name = 'enterprise_master_v8.db'
+        self.conn = sqlite3.connect(self.db_name, check_same_thread=False)
+        self.bootstrap()
 
-    def _init_core_tables(self):
-        # 1. 往来单位档案 (支持生命周期管理)
-        self.cursor.execute('''CREATE TABLE IF NOT EXISTS md_entities (
-            code TEXT PRIMARY KEY, name TEXT UNIQUE, category TEXT, status TEXT DEFAULT '激活')''')
-        # 2. 业财全流向总账 (核心逻辑：合同-出库-发票-核销)
-        self.cursor.execute('''CREATE TABLE IF NOT EXISTS tr_general_ledger (
-            doc_uuid TEXT PRIMARY KEY,
+    def bootstrap(self):
+        c = self.conn.cursor()
+        # 1. 业务员表 (Salesmen)
+        c.execute('''CREATE TABLE IF NOT EXISTS md_salesmen (
+            id INTEGER PRIMARY KEY, name TEXT UNIQUE, dept TEXT)''')
+        # 2. 客户表 (Customers - 关联业务员)
+        c.execute('''CREATE TABLE IF NOT EXISTS md_customers (
+            cust_id TEXT PRIMARY KEY, cust_name TEXT UNIQUE, 
+            salesman_name TEXT, credit_limit REAL)''')
+        # 3. 合同表 (Contracts)
+        c.execute('''CREATE TABLE IF NOT EXISTS md_contracts (
+            contract_no TEXT PRIMARY KEY, cust_name TEXT, 
+            sign_date DATE, total_budget REAL, status TEXT DEFAULT '执行中')''')
+        # 4. 核心账务明细表 (Transactions - 深度复刻截图逻辑)
+        c.execute('''CREATE TABLE IF NOT EXISTS tr_ledger (
+            entry_uuid TEXT PRIMARY KEY,
+            salesman_name TEXT,
             cust_name TEXT,
             contract_no TEXT,
-            delivery_no TEXT UNIQUE,
-            delivery_date DATE,
-            product_info TEXT,
-            total_amount REAL,
-            paid_amount REAL DEFAULT 0,
-            invoice_no TEXT,
-            invoice_status TEXT DEFAULT '未开票',
-            clearing_status TEXT DEFAULT '未结清', -- 未结清/部分核销/已结案/已红冲
-            audit_log TEXT,
-            is_locked INTEGER DEFAULT 0,
-            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            doc_date DATE,
+            item_desc TEXT,        -- 威曼凳、托卡费、落箱费等
+            spec_color TEXT,
+            qty REAL DEFAULT 0,
+            price REAL DEFAULT 0,
+            debit_amt REAL DEFAULT 0,  -- 借方：出库金额/增加欠款
+            credit_amt REAL DEFAULT 0, -- 贷方：回款/减少欠款
+            doc_type TEXT,             -- 出库单/费用单/回款单/红冲单
+            is_void INTEGER DEFAULT 0, -- 0:正常, 1:已红冲
+            operator TEXT,
+            audit_trail TEXT,          -- 审计日志记录
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
         self.conn.commit()
 
-    def log_audit(self, del_no, action):
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.cursor.execute("UPDATE tr_general_ledger SET audit_log = audit_log || ? WHERE delivery_no = ?", 
-                           (f"[{now}] {action} | ", del_no))
+    def query(self, sql, params=()):
+        return pd.read_sql(sql, self.conn, params=params)
+
+    def execute(self, sql, params=()):
+        self.conn.execute(sql, params)
         self.conn.commit()
 
-# 初始化
-erp = ERPDataCenter()
+erp = EnterpriseERPEngine()
 
-# --- 顶级 UI 框架：仿 SAP Fiori 风格 ---
-st.set_page_config(page_title="CQC 业财大师云平台", layout="wide")
+# ==========================================
+# 2. UI 深度布局：工业化侧边栏与多窗口任务
+# ==========================================
+st.set_page_config(page_title="CQC Group 业财一体化平台", layout="wide")
 
 st.markdown("""
-<style>
-    .stApp { background-color: #f0f4f7; }
-    .css-1d391kg { background-color: #1e293b; } /* 侧边栏颜色 */
-    .metric-container { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-    h1 { color: #1e3a8a; border-bottom: 3px solid #3b82f6; padding-bottom: 10px; }
-</style>
+    <style>
+    .main { background: #f4f7f9; }
+    .stSidebar { background-color: #0f172a !important; color: white !important; }
+    .metric-card { background: #ffffff; padding: 20px; border-radius: 10px; border: 1px solid #e2e8f0; }
+    .status-active { color: #059669; font-weight: bold; }
+    .status-void { color: #dc2626; text-decoration: line-through; }
+    </style>
 """, unsafe_allow_html=True)
 
-# 侧边栏导航 (多窗口并行逻辑)
+# 侧边栏：多维导航
 with st.sidebar:
-    st.title("🛡️ CQC ERP 5.0")
-    menu = st.selectbox("功能矩阵导航", [
-        "📊 财务驾驶舱 (Cockpit)",
-        "🏢 单位档案中心 (MDM)",
-        "🚚 业务流工作台 (SCM)",
-        "💰 智能对账中心 (Clearing)",
-        "🕵️ 审计与红冲中心 (Audit)"
+    st.image("https://cdn-icons-png.flaticon.com/512/3201/3201521.png", width=60)
+    st.title("集团业财中台")
+    st.divider()
+    
+    # 全局业务员筛选 (顶层隔离)
+    salesmen_list = erp.query("SELECT name FROM md_salesmen")['name'].tolist()
+    sel_salesman = st.selectbox("👤 当前业务员切换", ["全部业务员"] + salesmen_list)
+    
+    st.divider()
+    menu = st.radio("系统功能矩阵", [
+        "📊 集团看板 (Dashboard)",
+        "🏗️ 组织架构管理 (MDM)",
+        "📋 合同/业务流 (Transactions)",
+        "💰 财务结算中心 (Clearing)",
+        "📒 穿透式明细账 (Ledger)"
     ])
     st.divider()
-    st.info("当前节点: GitHub 生产集群")
+    st.caption("版本: V8.2 Enterprise | 生产集群")
 
-# --- 逻辑模块实现 ---
+# ==========================================
+# 3. 核心业务模块：严谨逻辑实现
+# ==========================================
 
-# 1. 财务驾驶舱 (抄袭 SAP 决策层分析)
-if menu == "📊 财务驾驶舱 (Cockpit)":
-    st.title("📊 集团财务实时看板")
-    df = pd.read_sql("SELECT * FROM tr_general_ledger WHERE clearing_status != '已红冲'", erp.conn)
-    if not df.empty:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("应收总债权", f"¥{df['total_amount'].sum():,.2f}")
-        c2.metric("已收总回款", f"¥{df['paid_amount'].sum():,.2f}")
-        c3.metric("待收账面净值", f"¥{(df['total_amount'].sum() - df['paid_amount'].sum()):,.2f}")
-        
-        fig = go.Figure(data=[go.Pie(labels=df['cust_name'], values=df['total_amount'], hole=.4)])
-        st.plotly_chart(fig, use_container_width=True)
+# --- 模块：组织架构 (实现业务员-客户-合同关联) ---
+if menu == "🏗️ 组织架构管理 (MDM)":
+    st.header("🏗️ 组织架构与档案中心")
+    t1, t2, t3 = st.tabs(["业务员档案", "客户主数据", "合同台账"])
+    
+    with t1:
+        with st.form("add_salesman"):
+            n = st.text_input("业务员姓名")
+            d = st.text_input("所属部门")
+            if st.form_submit_button("新增业务员"):
+                erp.execute("INSERT OR IGNORE INTO md_salesmen (name, dept) VALUES (?,?)", (n, d))
+        st.dataframe(erp.query("SELECT * FROM md_salesmen"), use_container_width=True)
 
-# 2. 业务流工作台 (深度业财钩稽)
-elif menu == "🚚 业务流工作台 (SCM)":
-    st.title("🚚 出库单据钩稽入账")
-    with st.expander("➕ 新增出库单 (关联小工单数据)", expanded=True):
-        all_custs = pd.read_sql("SELECT name FROM md_entities WHERE status='激活'", erp.conn)['name'].tolist()
+    with t2:
+        with st.form("add_cust"):
+            c_name = st.text_input("客户全称")
+            belongs_to = st.selectbox("归属业务员", salesmen_list)
+            if st.form_submit_button("保存客户档案"):
+                erp.execute("INSERT OR IGNORE INTO md_customers (cust_id, cust_name, salesman_name) VALUES (?,?,?)", 
+                            (str(uuid.uuid4())[:8], c_name, belongs_to))
+        st.dataframe(erp.query("SELECT * FROM md_customers"), use_container_width=True)
+
+# --- 模块：业务流 (实现合同号下的精准录入) ---
+elif menu == "📋 合同/业务流 (Transactions)":
+    st.header("📋 业务单据录入工作台")
+    
+    # 动态联动筛选：业务员 -> 客户 -> 合同
+    c1, c2, c3 = st.columns(3)
+    salesman = c1.selectbox("业务员", salesmen_list)
+    custs = erp.query(f"SELECT cust_name FROM md_customers WHERE salesman_name='{salesman}'")['cust_name'].tolist()
+    cust = c2.selectbox("关联客户", custs)
+    
+    with st.expander("➕ 录入出库/费用/回款明细 (多维钩稽)", expanded=True):
         with st.form("input_form"):
-            c1, c2, c3 = st.columns(3)
-            cust = c1.selectbox("选择对账单位", all_custs)
-            con = c1.text_input("合同号")
-            del_no = c2.text_input("出库单号 (唯一识别)")
-            del_date = c2.date_input("发货日期")
-            prod = c3.text_input("产品描述")
-            amt = c3.number_input("本单应收总额", min_value=0.0)
-            if st.form_submit_button("🛡️ 审核过账"):
-                try:
-                    erp.cursor.execute('''INSERT INTO tr_general_ledger 
-                        (doc_uuid, cust_name, contract_no, delivery_no, delivery_date, product_info, total_amount, audit_log)
-                        VALUES (?,?,?,?,?,?,?,?)''', (str(uuid.uuid4())[:8], cust, con, del_no, del_date, prod, amt, "单据创建审核过账"))
-                    erp.conn.commit()
-                    st.success("单据已入账并锁定。")
-                except: st.error("错误：单据号重复！")
+            cc1, cc2, cc3 = st.columns(3)
+            f_contract = cc1.text_input("合同号 (Contract ID)")
+            f_date = cc1.date_input("发生日期")
+            f_type = cc2.selectbox("单据类型", ["销售出库", "托卡费", "落箱费", "运费抵扣", "银行回款"])
+            f_item = cc2.text_input("品名/费用详情")
+            f_spec = cc3.text_input("规格/颜色")
+            f_amt = cc3.number_input("涉及金额", min_value=0.0)
+            
+            if st.form_submit_button("🛡️ 审核并过账"):
+                debit = f_amt if f_type in ["销售出库", "托卡费", "落箱费"] else 0
+                credit = f_amt if f_type in ["银行回款", "运费抵扣"] else 0
+                
+                erp.execute('''INSERT INTO tr_ledger 
+                    (entry_uuid, salesman_name, cust_name, contract_no, doc_date, item_desc, spec_color, debit_amt, credit_amt, doc_type)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)''', 
+                    (str(uuid.uuid4())[:8], salesman, cust, f_contract, f_date, f_item, f_spec, debit, credit, f_type))
+                st.success("单据已入账，滚动余额已实时计算。")
 
-# 3. 智能对账中心 (抄袭金蝶核心核销)
-elif menu == "💰 智能对账中心 (Clearing)":
-    st.title("💰 智能回款核销引擎")
-    df_p = pd.read_sql("SELECT delivery_no, cust_name, (total_amount - paid_amount) as bal FROM tr_general_ledger WHERE bal > 0 AND clearing_status != '已红冲'", erp.conn)
-    if not df_p.empty:
-        with st.form("clear_form"):
-            target = st.selectbox("选择对账单号", df_p['delivery_no'].tolist())
-            val = st.number_input("到账金额", min_value=0.0)
-            if st.form_submit_button("执行对账"):
-                erp.cursor.execute(f"UPDATE tr_general_ledger SET paid_amount = paid_amount + {val} WHERE delivery_no = '{target}'")
-                erp.cursor.execute(f"UPDATE tr_general_ledger SET clearing_status = CASE WHEN paid_amount >= total_amount THEN '已结案' ELSE '部分核销' END WHERE delivery_no = ?", (target,))
-                erp.conn.commit()
-                erp.log_audit(target, f"收到回款 ¥{val}")
-                st.success("对账完成")
+# --- 模块：穿透式明细账 (解决你看到的 Excel 逻辑问题) ---
+elif menu == "📒 穿透式明细账 (Ledger)":
+    st.header("📒 穿透式往来对账明细")
+    
+    # 过滤器
+    f_c1, f_c2, f_c3 = st.columns(3)
+    q_salesman = f_c1.selectbox("筛选业务员", ["全部"] + salesmen_list)
+    
+    where_clause = "WHERE is_void = 0"
+    if q_salesman != "全部":
+        where_clause += f" AND salesman_name = '{q_salesman}'"
+        
+    df = erp.query(f"SELECT * FROM tr_ledger {where_clause} ORDER BY doc_date ASC")
+    
+    if not df.empty:
+        # 核心滚动余额算法 (大师级复刻)
+        df['滚动欠款余额'] = (df['debit_amt'] - df['credit_amt']).cumsum()
+        
+        # 格式化显示
+        display_cols = ['doc_date', 'salesman_name', 'cust_name', 'contract_no', 'item_desc', 'spec_color', 'debit_amt', 'credit_amt', '滚动欠款余额', 'doc_type']
+        st.dataframe(df[display_cols].style.format({
+            'debit_amt': '¥{:,.2f}', 
+            'credit_amt': '¥{:,.2f}', 
+            '滚动欠款余额': '¥{:,.2f}'
+        }), use_container_width=True)
+        
+        # 导出功能
+        st.download_button("📤 导出当前对账单", df.to_csv(), "Detailed_Ledger.csv")
 
-# 4. 单位档案 (随增随删)
-elif menu == "🏢 单位档案中心 (MDM)":
-    st.title("🏢 往来单位档案")
-    with st.form("mdm"):
-        c_code = st.text_input("编码")
-        c_name = st.text_input("全称")
-        if st.form_submit_button("保存"):
-            erp.cursor.execute("INSERT OR REPLACE INTO md_entities (code, name) VALUES (?,?)", (c_code, c_name))
-            erp.conn.commit()
-    st.table(pd.read_sql("SELECT * FROM md_entities", erp.conn))
+# --- 模块：集团看板 (多维透视) ---
+elif menu == "📊 集团看板 (Dashboard)":
+    st.header("📊 集团经营监控大屏")
+    df_all = erp.query("SELECT * FROM tr_ledger WHERE is_void = 0")
+    
+    if not df_all.empty:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("全集团应收净额", f"¥{(df_all['debit_amt'].sum() - df_all['credit_amt'].sum()):,.2f}")
+        c2.metric("活跃合同总数", len(df_all['contract_no'].unique()))
+        c3.metric("本月回款总额", f"¥{df_all['credit_amt'].sum():,.2f}")
+        
+        # 业务员业绩排行榜
+        st.subheader("👨‍💼 业务员应收账款穿透分析")
+        perf = df_all.groupby('salesman_name')[['debit_amt', 'credit_amt']].sum()
+        perf['欠款余额'] = perf['debit_amt'] - perf['credit_amt']
+        st.bar_chart(perf['欠款余额'])
